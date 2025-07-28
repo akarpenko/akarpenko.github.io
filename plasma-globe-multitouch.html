@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Plasma Globe</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="glcanvas"></canvas>
+  <script type="module">
+    //import * as THREE from 'three';
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js';
+
+
+    // 1) Renderer + WebGL canvas
+    const canvas = document.getElementById('glcanvas');
+    const renderer = new THREE.WebGLRenderer({ canvas });
+    renderer.setPixelRatio(window.devicePixelRatio);
+
+    // 2) Scene & camera
+    const scene = new THREE.Scene();
+    const camera = new THREE.Camera();
+    camera.position.z = 1;
+
+    // 3) Geometry
+    const geometry = new THREE.PlaneGeometry(2, 2);
+
+    // 4) Uniforms
+    const uniforms = {
+      iTime: { value: 0.0 },
+      iResolution: { value: new THREE.Vector2() },
+      iMouse: { value: new THREE.Vector4(0, 0, 0, 0) },
+      iChannel0: { value: null }
+    };
+
+    const MAX_TOUCHES = 8;
+    const touches = new Map();
+
+    uniforms.iTouchCount = { value: 0 };
+    uniforms.iTouches = {
+      value: Array.from({ length: MAX_TOUCHES }, () => new THREE.Vector2())
+    };
+
+
+    // load a noise texture for iChannel0
+    new THREE.TextureLoader().load(
+      'noise.png',           // your 256×256 lookup texture
+      tex => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        uniforms.iChannel0.value = tex;
+      }
+    );
+
+    // 5) ShaderMaterial
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        varying vec2 vUv;
+        uniform float iTime;
+        uniform vec2 iResolution;
+        uniform vec4 iMouse;
+        uniform int  iTouchCount;
+        uniform vec2 iTouches[8];
+        uniform sampler2D iChannel0;
+
+        #define ENABLE_MOUSE 1
+        #define NUM_RAYS 12.
+        #define VOLUMETRIC_STEPS 19
+        #define MAX_ITER 35
+        #define FAR 6.
+        #define time iTime * 1.1
+
+        mat2 mm2(float a){
+          float c = cos(a), s = sin(a);
+          return mat2(c,-s, s,c);
+        }
+        float hash(float n){ return fract(sin(n)*43758.5453); }
+        float noise(float x){
+          return texture2D(iChannel0, vec2(x*0.01, 1.0)).x;
+        }
+        float noise(vec3 p){
+          vec3 ip = floor(p), fp = fract(p);
+          fp = fp*fp*(3.0-2.0*fp);
+          vec2 tap = (ip.xy + vec2(37.0,17.0)*ip.z) + fp.xy;
+          vec2 rg  = texture2D(iChannel0, (tap + 0.5)/256.0).yx;
+          return mix(rg.x, rg.y, fp.z);
+        }
+        mat3 m3 = mat3(
+           0.00,  0.80,  0.60,
+          -0.80,  0.36, -0.48,
+          -0.60, -0.48,  0.64
+        );
+        float flow(vec3 p, float t){
+          float z=2., rz=0.;
+          vec3 bp = p;
+          for(float i=1.; i<5.; i++){
+            p += time*0.1;
+            rz += (sin(noise(p + t*0.8)*6.0)*0.5 + 0.5)/z;
+            p = mix(bp, p, 0.6);
+            z *= 2.0; p *= 2.01; p *= m3;
+          }
+          return rz;
+        }
+        float sins(float x){
+          float rz=0., z=2.;
+          for(float i=0.; i<3.; i++){
+            rz += abs(fract(x*1.4)-0.5)/z;
+            x  *= 1.3;
+            z  *= 1.15;
+            x  -= time*0.65*z;
+          }
+          return rz;
+        }
+        float segm(vec3 p, vec3 a, vec3 b){
+          vec3 pa = p - a, ba = b - a;
+          float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+          return length(pa - ba*h)*0.5;
+        }
+        vec3 path(float i, float d, vec3 hit){
+          vec3 en = vec3(0.,0.,1.);
+          float sns2 = sins(d + i*0.5)*0.22;
+          float sns  = sins(d + i*0.6)*0.21;
+          if(dot(hit,hit)>0.0){
+            hit.xz *= mm2(sns2*0.5);
+            hit.xy *= mm2(sns*0.3);
+            return hit;
+          }
+          en.xz *= mm2((hash(i*10.569)-0.5)*6.2 + sns2);
+          en.xy *= mm2((hash(i*4.732)-0.5)*6.2  + sns);
+          return en;
+        }
+        vec2 map(vec3 p, float i, vec3 hit){
+          vec3 bg = vec3(0.0), p0 = p;
+          float lp = length(p);
+          vec3 en = path(i, lp, hit);
+          float ins = smoothstep(0.11,0.46,lp);
+          float outs = 0.15 + smoothstep(0.0,0.15,abs(lp-1.0));
+          p *= ins*outs;
+          float rz = segm(p, bg, en) - 0.011;
+          return vec2(rz, ins*outs);
+        }
+        float march(vec3 ro, vec3 rd, float startf, float maxd, float j, vec3 hit){
+          float precis = 0.001, h = 0.5, d = startf;
+          for(int i=0; i<MAX_ITER; i++){
+            if(abs(h)<precis || d>maxd) break;
+            d += h*1.2;
+            h  = map(ro + rd*d, j, hit).x;
+          }
+          return d;
+        }
+        vec3 vmarch(vec3 ro, vec3 rd, float j, vec3 orig, vec3 hit){
+          vec3 p = ro, sum = vec3(0.0);
+          for(int i=0; i<VOLUMETRIC_STEPS; i++){
+            vec2 r = map(p, j, hit);
+            p += rd*0.03;
+            float lp = length(p);
+            vec3 col = sin(vec3(1.05,2.5,1.52)*3.94 + r.y)*0.85 + 0.4;
+            col *= smoothstep(0.0,0.015,-r.x);
+            col *= smoothstep(0.04,0.2,abs(lp-1.1));
+            col *= smoothstep(0.1,0.34,lp);
+            sum += abs(col)*5.0*(1.2 - noise(lp*2.0 + j*13.0 + time*5.0)*1.1)
+                   / (log(distance(p,orig)-2.0) + 0.75);
+          }
+          return sum;
+        }
+        vec2 iSphere2(vec3 ro, vec3 rd){
+          vec3 oc = ro;
+          float b = dot(oc,rd), c = dot(oc,oc)-1.0;
+          float h = b*b - c;
+          if(h<0.0) return vec2(-1.0);
+          return vec2((-b - sqrt(h)), (-b + sqrt(h)));
+        }
+
+        void main(){
+          // normalized pixel coords
+          vec2 fragCoord = vUv * iResolution;
+          vec2 p = fragCoord / iResolution - 0.5;
+          p.x *= iResolution.x / iResolution.y;
+          vec2 um = iMouse.xy / iResolution - 0.5;
+          um.x *= iResolution.x / iResolution.y;
+
+          // camera
+          vec3 ro = vec3(0.0,0.0,5.0);
+          vec3 rd = normalize(vec3(p*0.7, -1.5));
+          mat2 mx = mm2(time*0.4), my = mm2(time*0.3);
+          ro.xz *= mx; rd.xz *= mx;
+          ro.xy *= my; rd.xy *= my;
+          vec3 bro = ro, brd = rd;
+          vec3 col = vec3(0.0125,0.0,0.025);
+
+          // volumetric rays
+          for(float j=1.0; j<NUM_RAYS+1.0; j++){
+            ro = bro; rd = brd;
+            float rz = march(ro, rd, 2.5, FAR, j, vec3(0.0));
+            if(rz < FAR){
+              vec3 pos = ro + rd*rz;
+              col = max(col, vmarch(pos, rd, j, bro, vec3(0.0)));
+            }
+          }
+
+          #if ENABLE_MOUSE
+          for (int ti = 0; ti < 8; ti++) {
+            if (ti >= iTouchCount) break;
+            // normalized and aspect-corrected touch coord
+            vec2 um = iTouches[ti] / iResolution - 0.5;
+            um.x *= iResolution.x / iResolution.y;
+
+            // cast a mouse-ray for this touch
+            vec3 hit = vec3(0.0);
+            vec3 rdm = normalize(vec3(um * 0.7, -1.5));
+            rdm.xz *= mx;  
+            rdm.xy *= my;
+
+            // sphere intersection
+            vec2 sph = iSphere2(bro, rdm);
+            if (sph.x > 0.0) {
+              vec3 hpos = bro + sph.x * rdm;
+              float  j   = NUM_RAYS + 1.0 + float(ti);
+              ro = bro; rd = brd;
+              float rz = march(ro, rd, 2.5, FAR, j, hpos);
+              if (rz < FAR) {
+                vec3 pos = ro + rd * rz;
+                col = max(col, vmarch(pos, rd, j, bro, hpos));
+              }
+            }
+          }
+          #endif
+
+          // add reflective sphere flow
+          ro = bro; rd = brd;
+          vec2 sph = iSphere2(ro, rd);
+          if(sph.x>0.0){
+            vec3 rf  = reflect(rd, normalize(ro + rd*sph.x));
+            vec3 rf2 = reflect(rd, normalize(ro + rd*sph.y));
+            float nz  = -log(abs(flow(rf*1.2, time)-0.01));
+            float nz2 = -log(abs(flow(rf2*1.2,-time)-0.01));
+            col += (0.1*nz*nz*vec3(0.12,0.12,0.5) +
+                    0.05*nz2*nz2*vec3(0.55,0.2,0.55))*0.8;
+          }
+
+          gl_FragColor = vec4(col*1.3, 1.0);
+        }
+      `,
+    });
+
+    // 6) Mesh + add to scene
+    const quad = new THREE.Mesh(geometry, material);
+    scene.add(quad);
+
+    // 7) Resize handler
+    function onResize() {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      uniforms.iResolution.value.set(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', onResize);
+    onResize();
+
+    function updateTouches() {
+      let idx = 0;
+      const H = renderer.domElement.clientHeight;
+      for (let [id, pos] of touches) {
+        if (idx >= MAX_TOUCHES) break;
+        // flip Y to bottom‐origin
+        uniforms.iTouches.value[idx].set(pos.x, H - pos.y);
+        idx++;
+      }
+      uniforms.iTouchCount.value = idx;
+    }
+
+    canvas.addEventListener('pointerdown', e => {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      updateTouches();
+    });
+    canvas.addEventListener('pointermove', e => {
+      if (!touches.has(e.pointerId)) return;
+      touches.get(e.pointerId).x = e.clientX;
+      touches.get(e.pointerId).y = e.clientY;
+      updateTouches();
+    });
+    canvas.addEventListener('pointerup', e => { touches.delete(e.pointerId); updateTouches(); });
+    canvas.addEventListener('pointercancel', e => { touches.delete(e.pointerId); updateTouches(); });
+
+    // 9) Animate
+    const clock = new THREE.Clock();
+    function render() {
+      uniforms.iTime.value = clock.getElapsedTime();
+      renderer.render(scene, camera);
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+  </script>
+</body>
+
+</html>
