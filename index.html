@@ -3,14 +3,15 @@
 
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,
-           initial-scale=1.2,
-           maximum-scale=1.2,
+  <meta name="viewport" content="
+           initial-scale=1.0,
+           maximum-scale=1.0,
            user-scalable=no">
   <title>Plasma Globe</title>
   <style>
     html,
     body {
+      zoom: 1.06;
       margin: 0;
       padding: 0;
       width: 100%;
@@ -34,8 +35,11 @@
       /* max-width: 100%; max-height: 100%; */
     }
 
-    html, body, canvas {
-      touch-action: none;   /* disable all default touch gestures (pan/zoom) */
+    html,
+    body,
+    canvas {
+      touch-action: none;
+      /* disable all default touch gestures (pan/zoom) */
     }
   </style>
 </head>
@@ -331,6 +335,11 @@
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
+
+    // disable Safari pinch/zoom gestures
+    window.addEventListener('gesturestart',  e => e.preventDefault());
+    window.addEventListener('gesturechange', e => e.preventDefault());
+    window.addEventListener('gestureend',    e => e.preventDefault());
   </script>
 </body>
 
