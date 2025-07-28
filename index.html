@@ -50,13 +50,13 @@
 
 
     // load a noise texture for iChannel0
-    new THREE.TextureLoader().load(
-      'noise.png',           // your 256×256 lookup texture
-      tex => {
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        uniforms.iChannel0.value = tex;
-      }
-    );
+    new THREE.TextureLoader().load('noise.png', tex => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.generateMipmaps = true;
+      tex.minFilter = THREE.LinearMipMapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      uniforms.iChannel0.value = tex;
+    });
 
     // 5) ShaderMaterial
     const material = new THREE.ShaderMaterial({
